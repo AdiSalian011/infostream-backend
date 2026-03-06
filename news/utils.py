@@ -23,7 +23,7 @@ def get_news_content(api_key, topic, language=NEWS_LANGUAGE, sort_by=NEWS_SORT_B
     """
     A helper function to get news articles based on the topic.
     parameters: 
-        - Asks for news api key(if not provided uses default).
+        - Asks for news api key(uses default).
         - news topic to generate articles for.
         - language -> by default english.
         - sroted by -> most relevant   

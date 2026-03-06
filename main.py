@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, EmailStr, Field
-from typing import Optional
+from pydantic import BaseModel, EmailStr, Field, AfterValidator, ConfigDict
+from typing import Optional, Annotated
 from sqlalchemy.orm import Session
 from passlib.context import CryptContext
 from hashlib import sha256
@@ -13,11 +13,14 @@ from fastapi.security import OAuth2PasswordBearer
 
 # Import database components
 from database import engine, Base, get_db
-from models import UserDetail, UserSetting, NewsTopicAndScheduleTime
+from models import UserDetail, UserLocation, NewsTopicAndScheduleTime
+
+# Import email sender
+from html_email.html_email import HTMLEmail
 
 # Scheduling task modules
 from contextlib import asynccontextmanager
-from scheduler import start_scheduler, stop_scheduler, scheduler
+from scheduler import start_scheduler, stop_scheduler, scheduler, load_and_schedule_jobs
 
 import os
 from dotenv import load_dotenv
@@ -148,41 +151,55 @@ app.add_middleware(
 Base.metadata.create_all(bind=engine)
 
 # ============================================
+# ALLOWING POPULAR EMAIL DOMAINS ONLY
+# ============================================
+ALLOWED_DOMAINS = {
+    'gmail.com', 'yahoo.com', 'outlook.com'
+}
+
+def popular_domains_only(value: str) -> str:
+    domain = value.lower().split('@')[-1]  # extracting domain
+    if domain not in ALLOWED_DOMAINS:
+        raise ValueError(
+            f'Email domain @{domain} is not supported. '
+            f'Please use one of: {", ".join(sorted(ALLOWED_DOMAINS))}'
+        )
+    return value.lower()
+
+PopularEmailStr = Annotated[EmailStr, AfterValidator(popular_domains_only)]
+
+# ============================================
 # PYDANTIC SCHEMAS
 # ============================================
-
 # User Authentication Schemas
 class UserSignUpRequest(BaseModel):
     firstName: str
     lastName: str
     fullName: Optional[str] = None
-    email: EmailStr
+    email: PopularEmailStr
     password: str
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class UserLoginRequest(BaseModel):
-    email: EmailStr
+    email: PopularEmailStr
     password: str
 
-# User Settings Schemas
-class UserSettingRequest(BaseModel):
-    country: Optional[str] = None
-    city: Optional[str] = None
-    newsApi: Optional[str] = None
-    weatherApi: Optional[str] = None
+class ForgotPasswordRequest(BaseModel):
+    email: PopularEmailStr
 
-class UserSettingResponse(BaseModel):
-    id: int = Field(alias='setting_id')  # Map database setting_id to response id
-    user_id: int
-    country: str
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str
+
+# User Location Schemas
+class UserLocationRequest(BaseModel):
+    country_code: str
+    country_name: str
     city: str
-    # Note: Not returning API keys for security
+    timezone_: Optional[str] = Field(None, alias='timezone')
 
-    class Config:
-        from_attributes = True
-        populate_by_name = True  # Allow both field names
+    model_config = {'populate_by_name': True}
 
 # News Topic and Schedule Schemas
 class NewsTopicScheduleRequest(BaseModel):
@@ -191,19 +208,6 @@ class NewsTopicScheduleRequest(BaseModel):
     deliveryTime: Optional[str] = None
     isImmediate: Optional[bool] = None
     isScheduled: Optional[bool] = None
-
-class NewsTopicScheduleResponse(BaseModel):
-    id: int = Field(alias='news_id')  # Map database news_id to response id
-    user_id: int
-    newsTopic: str
-    isCustomTopic: bool
-    deliveryTime: str
-    isImmediate: bool
-    isScheduled: bool
-
-    class Config:
-        from_attributes = True
-        populate_by_name = True  # Allow both field names
 
 ## Token as a response
 class Token(BaseModel):
@@ -222,13 +226,14 @@ async def root():
         "endpoints": {
             "authentication": {
                 "signup": "POST /signup",
-                "login": "POST /login"
+                "login": "POST /login",
+                "redirect": "GET user/redirect/"
             },
-            "user_settings": {
-                "create": "POST /settings/{user_id}",
-                "get": "GET /settings/{user_id}",
-                "update": "PUT /settings/{user_id}",
-                "delete": "DELETE /settings/{user_id}"
+            "user_location": {
+                "create": "POST user/location/",
+                "get": "GET user/location/",
+                "update": "PUT user/location/",
+                "delete": "DELETE user/location/"
             },
             "news_preferences": {
                 "create": "POST /news-preferences/{user_id}",
@@ -358,6 +363,94 @@ async def login_user(
             detail=f'Error during login: {str(exc)}'
         )
 
+# ============================================
+# FORGOT PASSWORD ENDPOINT
+# ============================================
+@app.post('/forgot-password')
+async def forgot_password(
+    request: ForgotPasswordRequest,
+    db: Session = Depends(get_db)
+):
+    user = db.query(UserDetail).filter(
+        UserDetail.email == request.email
+    ).first()
+
+    ## Step1: Check if user exists
+    if not user:
+        raise HTTPException(
+            status_code=404,
+            detail=f'User with email {request.email} not found. Try Logging in.'
+        )
+    
+    ## Step2: Create shorter token
+    reset_token = create_access_token(
+        data={
+            'sub': str(user.id),
+            'purpose': 'password_reset'
+        },
+        expires_delta=timedelta(minutes=15)
+    )
+
+    reset_link = f'{os.getenv('FRONTEND_URL')}/reset_password.html?token={reset_token}'
+    html_content = f"""
+        <h2>Reset Your Password</h2>
+        <p>Click the link below. It expires in 15 minutes.</p>
+        <a href="{reset_link}" style="padding:10px 20px; background:#4CAF50; color:white; text-decoration:none; border-radius:5px;">
+            Reset Password
+        </a>
+        <p>If you didn't request this, ignore this email.</p>
+    """
+
+    email_sender = HTMLEmail()
+    email_sender.send_html_content(
+        to_email=request.email,
+        html_content=html_content,
+        subject='Reset your InfoStream Password'
+    )
+
+    return {
+        'message': f'A reset link has been sent at {request.email}'
+    }
+
+# ============================================
+# RESET PASSWORD ENDPOINT
+# ============================================
+@app.post('/reset-password')
+async def reset_password(
+    request: ResetPasswordRequest,
+    db: Session = Depends(get_db)
+):
+    credentials_exception = HTTPException(
+        status_code=400,
+        detail='Invalid or expired reset link'
+    )
+
+    try:
+        payload = jwt.decode(request.token, key=SECRET_KEY, algorithms=[ALGORITHM])
+        user_id = payload.get('sub')
+        purpose = payload.get('purpose')
+
+        if not user_id or purpose != 'password_reset':
+            raise credentials_exception
+        
+    except JWTError:
+        raise credentials_exception
+    
+    user = db.query(UserDetail).filter(
+        UserDetail.id == int(user_id)
+    ).first()
+
+    if not user:
+        raise credentials_exception
+    
+    # Hash and update password 
+    user.password = hash_password(request.new_password)
+    db.commit()
+
+    return {
+        'message': 'Password updated successfully.'
+    }
+
 @app.get('/user/redirect')
 async def get_redirect_url(
     current_user: UserDetail = Depends(get_current_user),
@@ -365,21 +458,21 @@ async def get_redirect_url(
 ):
     """
     Determine where to redirect user based on profile completion (PROTECTED ROUTE)
-    - Checks if user has completed settings
+    - Checks if user has completed location data
     - Checks if user has completed news preferences
     - Returns appropriate redirect URL
     """
     try:
-        user_settings = db.query(UserSetting).filter(
-            UserSetting.user_id==current_user.id
+        user_location = db.query(UserLocation).filter(
+            UserLocation.user_id==current_user.id
         ).first()
 
         news_preferences = db.query(NewsTopicAndScheduleTime).filter(
             NewsTopicAndScheduleTime.user_id==current_user.id
         ).first()
 
-        if not user_settings:
-            redirect_url = 'user-settings.html'
+        if not user_location:
+            redirect_url = 'user-location.html'
         elif not news_preferences:
             redirect_url = 'topic-and-schedule.html'
         else:
@@ -396,19 +489,57 @@ async def get_redirect_url(
         )
 
 # ============================================
-# USER SETTINGS ENDPOINTS (Page 2)
+# USER LOCATION ENDPOINTS (Page 2)
 # ============================================
+@app.get('/user/location')
+async def get_user_location(
+    current_user: UserDetail = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Gets location data from user"""
+    try:
+        #Step1: Check if user exists
+        if not current_user:
+            raise HTTPException(
+                status_code=404,
+                detail='User not found'
+            )
+        #Step2: Get existing user's location data
+        user_location = db.query(UserLocation).filter(
+            UserLocation.user_id==current_user.id
+        ).first()
 
-@app.post('/user/setting')
-async def create_user_settings(
-    settings_data: UserSettingRequest,
+        if not user_location:
+            raise HTTPException(
+                status_code=404,
+                detail='Location not found'
+            )
+
+        #Step3: Send location data to frontend
+        return{
+            'country_code': user_location.country_code,
+            'country_name': user_location.country_name,
+            'city': user_location.city,
+            'timezone': user_location.timezone_
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f'Error getting user location data {exc}'
+        )
+
+@app.post('/user/location')
+async def create_user_location(
+    location_data: UserLocationRequest,
     current_user: UserDetail = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
     Verifies user based on token
-    Create user settings (country, city, API keys).
-    Called when user completes the settings page.
+    Create user location (country, city, timezone_).
+    Called when user completes the location page.
     """
     try:
         #Step1: Verify user exists
@@ -416,20 +547,20 @@ async def create_user_settings(
             raise HTTPException(status_code=404, detail='User not found')
 
         #Step2: Create new user setting record
-        new_settings_data = UserSetting(
+        new_location_data = UserLocation(
             user_id=current_user.id,
-            country=settings_data.country,
-            city=settings_data.city,
-            newsApi=settings_data.newsApi,
-            weatherApi=settings_data.weatherApi
+            country_code=location_data.country_code,
+            country_name=location_data.country_name,
+            city=location_data.city,
+            timezone_=location_data.timezone_
         )
 
-        db.add(new_settings_data)
+        db.add(new_location_data)
         db.commit()
-        db.refresh(new_settings_data)
+        db.refresh(new_location_data)
         
         return{
-            'success_message': 'User Setting saved successfully'
+            'success_message': 'User Location saved successfully'
         }
     except HTTPException:
         raise
@@ -437,42 +568,42 @@ async def create_user_settings(
         db.rollback()
         raise HTTPException(
             status_code=500,
-            detail=f'Error creating settings: {str(exc)}'
+            detail=f'Error saving user data: {str(exc)}'
         )
 
-@app.put('/user/setting')
-async def update_user_settings(
-    settings_data: UserSettingRequest,
+@app.put('/user/location')
+async def update_user_location(
+    location_data: UserLocationRequest,
     current_user: UserDetail = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
     Get current user
-    Update user settings (partial update supported).
+    Update user location (partial update supported).
     Only updates fields that are provided in the request.
     """
     try:
         #Step1: Get current user
-        settings = db.query(UserSetting).filter(
-            UserSetting.user_id == current_user.id
+        user_location = db.query(UserLocation).filter(
+            UserLocation.user_id == current_user.id
         ).first()
 
-        if not settings:
+        if not user_location:
             raise HTTPException(
                 status_code=404,
-                detail='Settings not found. Use POST /settings/{user_id} to create.'
+                detail='Location not found. Use POST /user/location/ to create.'
             )
 
         #Step2: Update only provided fields
-        update_data = settings_data.model_dump(exclude_unset=True)
+        update_data = location_data.model_dump(exclude_unset=True)
         
         for field, value in update_data.items():
-            setattr(settings, field, value)
+            setattr(user_location, field, value)
 
         db.commit()
-        db.refresh(settings)
+        db.refresh(user_location)
 
-        return settings
+        return user_location
 
     except HTTPException:
         raise
@@ -480,7 +611,7 @@ async def update_user_settings(
         db.rollback()
         raise HTTPException(
             status_code=500,
-            detail=f'Error updating settings: {str(exc)}'
+            detail=f'Error updating location: {str(exc)}'
         )
 # ============================================
 # NEWS PREFERENCES ENDPOINTS (Page 3)
@@ -514,6 +645,10 @@ async def create_news_preferences(
 
         db.add(new_preferences)
         db.commit()
+
+        ## schedule task
+        load_and_schedule_jobs()
+
         db.refresh(new_preferences)
 
         return new_preferences
@@ -604,6 +739,10 @@ async def update_news_preferences(
             setattr(preference, field, value)
 
         db.commit()
+
+        ## reschedule job
+        load_and_schedule_jobs()
+
         db.refresh(preference)
 
     except HTTPException:

@@ -42,10 +42,10 @@ class UserDetail(Base):
         return f'<UserDetail(id={self.id}, email={self.email}, name={self.fullName})>'
 
 # ============================================
-# USER SETTING
+# USER location
 # ============================================
-class UserSetting(Base):
-    __tablename__ = 'userSettings'
+class UserLocation(Base):
+    __tablename__ = 'userLocation'
     # Primary key: Auto-incrementing ID for each news topic entry
     # This is unique for EVERY row, regardless of which user it belongs to 
     setting_id = Column(
@@ -62,14 +62,15 @@ class UserSetting(Base):
         index=True  # Index for faster queries by user
     )
 
-    country = Column(String(50), nullable=False)
-    city = Column(String(50), nullable=False)
-    newsApi = Column(String(255), nullable=True, default=None)
-    weatherApi = Column(String(255), nullable=True, default=None)
+    ## Storing ISO code
+    country_code = Column(String(2), nullable=False)  # "IN", "US", "JP"
+    country_name = Column(String(100), nullable=False)  # India, Japan etc
+    city = Column(String(100), nullable=False)  # "Mumbai"
+    timezone_ = Column(String(50), nullable=False, default='UTC')  # "Asia/Kolkata"
 
     # Useful for debugging
     def __repr__(self):
-        return f'<UserSetting(id={self.setting_id}, country={self.country}, city={self.city})>'
+        return f'<UserLocation(id={self.setting_id}, country={self.country_code}, city={self.city}, timezone={self.timezone_})>'
 
 # ============================================
 # NEWS TOPIC AND SCHEDULE TIME

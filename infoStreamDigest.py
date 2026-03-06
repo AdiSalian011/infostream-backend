@@ -1,6 +1,6 @@
 import logging
 from typing import List, Dict, Optional, Tuple
-from models import UserDetail, UserSetting, NewsTopicAndScheduleTime
+from models import UserDetail, UserLocation, NewsTopicAndScheduleTime
 from database import get_db
 from sqlalchemy.orm import Session
 from fastapi import Depends
@@ -35,7 +35,8 @@ class InfoStreamDigest:
     def get_users_to_notify(
         self, 
         db: Session, 
-        target_time: Optional[str] = None
+        target_time: Optional[str] = None,
+        target_timezone: Optional[str] = None
     ):
         """
         Fetch users who should receive news digest.
@@ -51,14 +52,13 @@ class InfoStreamDigest:
             query = db.query(
                 UserDetail.id,
                 UserDetail.email,
-                UserSetting.city,
-                UserSetting.newsApi,
-                UserSetting.weatherApi,
+                UserLocation.city,
+                UserLocation.timezone_,
                 NewsTopicAndScheduleTime.newsTopic,
                 NewsTopicAndScheduleTime.deliveryTime,
             ).join(
-                UserSetting,
-                UserDetail.id == UserSetting.user_id
+                UserLocation,
+                UserDetail.id == UserLocation.user_id
             ).join(
                 NewsTopicAndScheduleTime,
                 UserDetail.id == NewsTopicAndScheduleTime.user_id
@@ -68,6 +68,11 @@ class InfoStreamDigest:
             if target_time:
                 query = query.filter(
                     NewsTopicAndScheduleTime.deliveryTime == target_time
+                )
+
+            if target_timezone:
+                query = query.filter(
+                    UserLocation.timezone_ == target_timezone
                 )
             
             results = query.all()
@@ -88,15 +93,14 @@ class InfoStreamDigest:
                         'id': row[0],
                         'email': row[1],
                         'city': row[2],
-                        'news_api_key': row[3],
-                        'weather_api_key': row[4],
+                        'timezone': row[3],
                         'news_preferences': []  # FIX: Initialize the list!
                     }
 
                 # Add news preference to user's list
                 user_data_map[user_id]['news_preferences'].append({
-                    'news_topic': row[5],
-                    'delivery_time': row[6],
+                    'news_topic': row[4],
+                    'delivery_time': row[5],
                 })
 
             user_data = list(user_data_map.values())
@@ -113,8 +117,6 @@ class InfoStreamDigest:
         self, 
         news_topic: str, 
         city_name: str,
-        news_api_key: str,
-        weather_api_key: str
     ):
         """
         Generate HTML content from current data.
@@ -130,8 +132,7 @@ class InfoStreamDigest:
             # Fetch news data
             logger.info(f"Fetching news for topic: {news_topic}")
             news_data = self.news_api.get_top_news(
-                topic=news_topic,
-                api_key=news_api_key
+                topic=news_topic
             )
             
             # Check if error was returned as string
@@ -145,8 +146,7 @@ class InfoStreamDigest:
             # Fetch weather data
             logger.info(f"Fetching weather for city: {city_name}")
             weather_data = self.weather_api.get_weather_info(
-                city_name=city_name,
-                api_key=weather_api_key
+                city_name=city_name
             )
             
             if isinstance(weather_data, str):
@@ -192,9 +192,7 @@ class InfoStreamDigest:
         self, 
         user_email: str, 
         news_topic: str, 
-        city_name: str,
-        news_api_key: str,
-        weather_api_key: str
+        city_name: str
     ):
         """
         Send personalized news digest to a single user.
@@ -211,9 +209,7 @@ class InfoStreamDigest:
             # Generate HTML content
             rendered_html, html_error = self._generate_html(
                 news_topic, 
-                city_name,
-                news_api_key,
-                weather_api_key
+                city_name
             )
             
             if html_error:
@@ -247,7 +243,8 @@ class InfoStreamDigest:
     def send_emails_batch(
         self, 
         db: Session = Depends(get_db), 
-        target_time: Optional[str] = None
+        target_time: Optional[str] = None,
+        target_timezone: Optional[str] = None
     ):
         """
         Send news digests to all users scheduled for a specific time.
@@ -269,7 +266,7 @@ class InfoStreamDigest:
         logger.info(f"Starting batch email job for time: {target_time}")
         
         # Get users to notify
-        users, db_error = self.get_users_to_notify(db, target_time)
+        users, db_error = self.get_users_to_notify(db, target_time, target_timezone)
         
         if db_error:
             return {
@@ -299,8 +296,7 @@ class InfoStreamDigest:
         for user in users:
             user_email = user['email']
             city = user['city']
-            news_api_key = user['news_api_key']
-            weather_api_key = user['weather_api_key']
+            timezone = user['timezone']
             
             # Handle multiple news topics per user
             for preference in user['news_preferences']:
@@ -310,8 +306,6 @@ class InfoStreamDigest:
                     user_email=user_email,
                     news_topic=news_topic,
                     city_name=city,
-                    news_api_key=news_api_key,
-                    weather_api_key=weather_api_key
                 )
                 
                 if success:
@@ -364,14 +358,12 @@ class InfoStreamDigest:
             user_data = db.query(
                 UserDetail.id,
                 UserDetail.email,
-                UserSetting.city,
-                UserSetting.newsApi,
-                UserSetting.weatherApi,
+                UserLocation.city,
                 NewsTopicAndScheduleTime.news_id,
                 NewsTopicAndScheduleTime.newsTopic
             ).join(
-                UserSetting,
-                UserDetail.id == UserSetting.user_id
+                UserLocation,
+                UserDetail.id == UserLocation.user_id
             ).join(
                 NewsTopicAndScheduleTime,
                 UserDetail.id == NewsTopicAndScheduleTime.user_id
@@ -396,14 +388,12 @@ class InfoStreamDigest:
                     users_map[user_id] = {
                         'email': row[1],
                         'city': row[2],
-                        'news_api_key': row[3],
-                        'weather_api_key': row[4],
                         'news_preference': []
                     }
 
                 users_map[user_id]['news_preference'].append({
-                    'schedule_id': row[5],
-                    'news_topic': row[6]
+                    'schedule_id': row[3],
+                    'news_topic': row[4]
                 })
 
             # Track results
@@ -417,8 +407,6 @@ class InfoStreamDigest:
             for user_id, user_info in users_map.items():
                 email = user_info['email']
                 city = user_info['city']
-                news_api_key = user_info['news_api_key']
-                weather_api_key = user_info['weather_api_key']
 
                 logger.info(f"Processing immediate emails for user: {email}")
 
@@ -433,8 +421,6 @@ class InfoStreamDigest:
                         user_email=email,
                         news_topic=news_topic,
                         city_name=city,
-                        news_api_key=news_api_key,
-                        weather_api_key=weather_api_key
                     )
 
                     if success:
@@ -492,50 +478,3 @@ class InfoStreamDigest:
                 'emails_failed': 0,
                 'errors': [str(exc)]
             }
-
-# ============================================
-# EXAMPLE USAGE WITH SCHEDULER
-# ============================================
-"""
-Example with APScheduler:
-
-from apscheduler.schedulers.background import BackgroundScheduler
-from database import SessionLocal
-
-def scheduled_job():
-    db = SessionLocal()
-    try:
-        digest = InfoStreamDigest()
-        result = digest.send_emails_batch(db, target_time="09:00")
-        logger.info(f"Job result: {result}")
-    finally:
-        db.close()
-
-scheduler = BackgroundScheduler()
-scheduler.add_job(scheduled_job, 'cron', hour=9, minute=0)
-scheduler.start()
-"""
-
-# ============================================
-# EXAMPLE USAGE WITH FASTAPI
-# ============================================
-"""
-from fastapi import FastAPI, Depends, HTTPException
-from sqlalchemy.orm import Session
-from database import get_db
-
-app = FastAPI()
-digest = InfoStreamDigest()
-
-@app.post("/send-immediate/{user_id}")
-def send_immediate(user_id: int, db: Session = Depends(get_db)):
-    result = digest.send_immediate_email(user_id, db)
-    if result['status'] == 'error':
-        raise HTTPException(status_code=400, detail=result['message'])
-    return result
-
-@app.post("/send-batch")
-def send_batch(target_time: str, db: Session = Depends(get_db)):
-    result = digest.send_emails_batch(db, target_time)
-    return result
-"""
