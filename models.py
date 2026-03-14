@@ -65,6 +65,8 @@ class UserLocation(Base):
     ## Storing ISO code
     country_code = Column(String(2), nullable=False)  # "IN", "US", "JP"
     country_name = Column(String(100), nullable=False)  # India, Japan etc
+    state_code = Column(String(10), nullable=True)  # MH
+    state_name = Column(String(100), nullable=True)  # Maharashtra
     city = Column(String(100), nullable=False)  # "Mumbai"
     timezone_ = Column(String(50), nullable=False, default='UTC')  # "Asia/Kolkata"
 

@@ -196,6 +196,8 @@ class ResetPasswordRequest(BaseModel):
 class UserLocationRequest(BaseModel):
     country_code: str
     country_name: str
+    state_code: Optional[str] = None
+    state_name: Optional[str] = None
     city: str
     timezone_: Optional[str] = Field(None, alias='timezone')
 
@@ -391,7 +393,7 @@ async def forgot_password(
         expires_delta=timedelta(minutes=15)
     )
 
-    reset_link = f'{os.getenv('FRONTEND_URL')}/reset_password.html?token={reset_token}'
+    reset_link = f'{os.getenv("FRONTEND_URL")}/reset_password.html?token={reset_token}'
     html_content = f"""
         <h2>Reset Your Password</h2>
         <p>Click the link below. It expires in 15 minutes.</p>
@@ -519,6 +521,8 @@ async def get_user_location(
         return{
             'country_code': user_location.country_code,
             'country_name': user_location.country_name,
+            'state_code': user_location.state_code,
+            'state_name': user_location.state_name,
             'city': user_location.city,
             'timezone': user_location.timezone_
         }
@@ -551,6 +555,8 @@ async def create_user_location(
             user_id=current_user.id,
             country_code=location_data.country_code,
             country_name=location_data.country_name,
+            state_code=location_data.state_code,
+            state_name=location_data.state_name,
             city=location_data.city,
             timezone_=location_data.timezone_
         )
@@ -595,7 +601,7 @@ async def update_user_location(
             )
 
         #Step2: Update only provided fields
-        update_data = location_data.model_dump(exclude_unset=True)
+        update_data = location_data.model_dump(exclude_unset=True, by_alias=False)
         
         for field, value in update_data.items():
             setattr(user_location, field, value)
@@ -603,7 +609,7 @@ async def update_user_location(
         db.commit()
         db.refresh(user_location)
 
-        return user_location
+        return {'message': 'User Location updated successfully'}
 
     except HTTPException:
         raise
@@ -651,7 +657,9 @@ async def create_news_preferences(
 
         db.refresh(new_preferences)
 
-        return new_preferences
+        return{
+            'success_message': 'News Preference saved successfully'
+        }
 
     except HTTPException:
         raise
@@ -744,6 +752,7 @@ async def update_news_preferences(
         load_and_schedule_jobs()
 
         db.refresh(preference)
+        return {'message': 'Preference updated successfully'}
 
     except HTTPException:
         raise
