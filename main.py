@@ -394,14 +394,14 @@ async def forgot_password(
     )
 
     reset_link = f'{os.getenv("FRONTEND_URL")}/reset_password.html?token={reset_token}'
-    html_content = f"""
+    html_content = f'''
         <h2>Reset Your Password</h2>
         <p>Click the link below. It expires in 15 minutes.</p>
         <a href="{reset_link}" style="padding:10px 20px; background:#4CAF50; color:white; text-decoration:none; border-radius:5px;">
             Reset Password
         </a>
         <p>If you didn't request this, ignore this email.</p>
-    """
+    '''
 
     email_sender = HTMLEmail()
     email_sender.send_html_content(
@@ -819,6 +819,6 @@ async def health_check():
         'scheduler_running': scheduler.running
     }
 
-if __name__ == '__main__':
-    import uvicorn
-    uvicorn.run(app, host='0.0.0.0', port=8000)
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
